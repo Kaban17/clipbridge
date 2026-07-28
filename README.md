@@ -1,6 +1,6 @@
 # clipbridge
 
-A shared clipboard (text + images + files + history) between a Linux machine and any device with a browser. A single file, Python standard library only — nothing to install on the second device.
+A shared clipboard (text + images + files + history) between a Linux machine and any device with a browser. A single Go file, standard library only — nothing to install on the second device.
 
 ## How it works
 
@@ -13,7 +13,7 @@ A small HTTP server runs on the Linux machine. On any other device (Windows, Mac
 
 ## Installation
 
-You need Python 3 and one of the clipboard tools:
+You need Go (only to build) and one of the clipboard tools:
 
 ```bash
 sudo apt install wl-clipboard   # Wayland
@@ -21,12 +21,13 @@ sudo apt install xclip          # X11
 sudo apt install xsel           # X11, no image support
 ```
 
-That's it — the script has no dependencies.
+That's it — no third-party dependencies.
 
 ## Usage
 
 ```bash
-python3 main.py
+go build -o clipbridge .   # once; produces a single static binary
+./clipbridge               # or just: go run .
 ```
 
 The server prints an address like `http://192.168.x.x:8765/` — open it in a browser on the other device.
@@ -34,16 +35,16 @@ The server prints an address like `http://192.168.x.x:8765/` — open it in a br
 All options:
 
 ```bash
-python3 main.py --port 9000 --token secret --dir ~/clipbridge --history 300
+./clipbridge -port 9000 -token secret -dir ~/clipbridge -history 300
 ```
 
 | Option | Default | What it does |
 |---|---|---|
-| `--host` | `0.0.0.0` | Address the server listens on |
-| `--port` | `8765` | Port |
-| `--token` | *(empty)* | Simple password; appended to the URL as `?token=...` |
-| `--dir` | `~/clipbridge` | Shared folder for files |
-| `--history` | `200` | How many history entries to keep (`0` — disable) |
+| `-host` | `0.0.0.0` | Address the server listens on |
+| `-port` | `8765` | Port |
+| `-token` | *(empty)* | Simple password; appended to the URL as `?token=...` |
+| `-dir` | `~/clipbridge` | Shared folder for files |
+| `-history` | `200` | How many history entries to keep (`0` — disable) |
 
 History is stored in `<shared folder>/.clipbridge/`: text in `history.json`, images as files in `img/`.
 
@@ -53,9 +54,11 @@ This is a tool for a trusted local network. There is no HTTPS, and the token tra
 
 ## Under the hood
 
-A single file, `main.py`:
+A single file, `main.go`:
 
-- a background thread polls the Linux clipboard every 0.5 s via `xclip`/`wl-paste`;
+- a background goroutine polls the Linux clipboard every 0.5 s via `xclip`/`wl-paste`;
 - the browser keeps a long-poll request to `/clip` and receives changes instantly;
 - echo loops are suppressed by comparing text and image SHA1 digests;
-- the web page (dark/light theme auto-following the system, Russian/English interface with a toggle in the header) is embedded in the script as a string.
+- the web page (dark/light theme auto-following the system, Russian/English interface with a toggle in the header) is embedded in the binary as a string.
+
+The original Python implementation with identical behavior is kept in `main.py` (`python3 main.py`, stdlib only).
