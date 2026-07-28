@@ -432,6 +432,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>clipbridge</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2312151a'/%3E%3Crect x='16' y='14' width='32' height='40' rx='5' fill='none' stroke='%23dfe5ec' stroke-width='4'/%3E%3Crect x='24' y='9' width='16' height='10' rx='3' fill='%2312151a' stroke='%23dfe5ec' stroke-width='4'/%3E%3Cpath d='M24 29h13m-4-4 4 4-4 4M40 44H27m4-4-4 4 4 4' fill='none' stroke='%236fcf97' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
   /* Dark palette — default and for data-theme="dark" */
   :root, :root[data-theme="dark"] {
