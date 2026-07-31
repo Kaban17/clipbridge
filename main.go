@@ -57,8 +57,15 @@ const (
 
 var imageTypes = []string{"image/png", "image/jpeg", "image/gif", "image/webp"}
 
+// File managers advertise a copied file under these targets instead of text/plain.
+var uriTypes = []string{"text/uri-list", "x-special/gnome-copied-files"}
+
 func isImageType(t string) bool {
 	return slices.Contains(imageTypes, t)
+}
+
+func isURIType(t string) bool {
+	return slices.Contains(uriTypes, t)
 }
 
 // collapse joins all whitespace runs into single spaces and caps the result at n runes.
@@ -160,6 +167,41 @@ func (b *Backend) readText() string {
 	default:
 		return string(b.output(3*time.Second, "xsel", "--clipboard", "--output"))
 	}
+}
+
+// readURIs returns the local paths of the files a file manager put on the clipboard.
+func (b *Backend) readURIs(mimeType string) []string {
+	switch b.kind {
+	case "wayland":
+		return parseURIList(string(b.output(3*time.Second, "wl-paste", "--type", mimeType)))
+	case "xclip":
+		return parseURIList(string(b.output(3*time.Second,
+			"xclip", "-selection", "clipboard", "-t", mimeType, "-o")))
+	default:
+		return nil
+	}
+}
+
+// parseURIList turns a text/uri-list (or x-special/gnome-copied-files) payload
+// into local paths, dropping anything that is not a local file.
+func parseURIList(raw string) []string {
+	var paths []string
+	for line := range strings.SplitSeq(raw, "\n") {
+		line = strings.TrimSpace(line)
+		// x-special/gnome-copied-files starts with a "copy"/"cut" line.
+		if line == "" || strings.HasPrefix(line, "#") || line == "copy" || line == "cut" {
+			continue
+		}
+		if !strings.HasPrefix(line, "file://") {
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil || u.Path == "" || slices.Contains(paths, u.Path) {
+			continue
+		}
+		paths = append(paths, u.Path)
+	}
+	return paths
 }
 
 func (b *Backend) writeText(text string) {
@@ -453,6 +495,17 @@ type snapshot struct {
 	Origin     string     `json:"origin"`
 	Image      *snapImage `json:"image"`
 	Files      []snapFile `json:"files"`
+	ClipFiles  []snapFile `json:"clip_files"`
+}
+
+// clipFile is a file copied on linux; the path stays on the server, the browser
+// refers to it by index. Saved is the name it got in the shared folder once
+// grabbed, so grabbing the same file twice does not pile up copies.
+type clipFile struct {
+	Name  string
+	Path  string
+	Size  int64
+	Saved string
 }
 
 // State is the current clipboard (text/image), files and version counters.
@@ -466,6 +519,7 @@ type State struct {
 	origin     string
 	image      *imageData
 	files      []fileInfo
+	clipFiles  []clipFile
 	version    int64
 	historyRev int64
 	history    *History // assigned in main
@@ -557,6 +611,81 @@ func (s *State) setFiles(files []fileInfo) bool {
 	return true
 }
 
+// setClipFiles announces files copied on linux; the browser fetches them on demand.
+func (s *State) setClipFiles(paths []string) bool {
+	entries := make([]clipFile, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		// Directories cannot be sent as a single file, so skip them.
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		entries = append(entries, clipFile{Name: filepath.Base(path), Path: path, Size: info.Size()})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Compare the clipboard content only: Saved is our own bookkeeping, and
+	// including it would make every poll look like a change.
+	if sameClipFiles(entries, s.clipFiles) {
+		return false
+	}
+	s.clipFiles = entries
+	s.bumpLocked()
+	return true
+}
+
+func sameClipFiles(a, b []clipFile) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Path != b[i].Path || a[i].Size != b[i].Size {
+			return false
+		}
+	}
+	return true
+}
+
+// markGrabbed remembers the shared-folder name a clipboard file was copied under.
+func (s *State) markGrabbed(index int, path, saved string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// The clipboard may have changed while the copy was running.
+	if index >= 0 && index < len(s.clipFiles) && s.clipFiles[index].Path == path {
+		s.clipFiles[index].Saved = saved
+	}
+}
+
+func (s *State) clearClipFiles() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.clipFiles) == 0 {
+		return false
+	}
+	s.clipFiles = nil
+	s.bumpLocked()
+	return true
+}
+
+func (s *State) clipFile(index int) (clipFile, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index < 0 || index >= len(s.clipFiles) {
+		return clipFile{}, false
+	}
+	return s.clipFiles[index], true
+}
+
+func (s *State) clipFileNames() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.clipFiles))
+	for _, f := range s.clipFiles {
+		names = append(names, f.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
 func (s *State) noteHistory() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -591,6 +720,10 @@ func (s *State) snapshotLocked() snapshot {
 	for _, f := range s.files {
 		files = append(files, snapFile{Name: f.Name, Size: f.Size})
 	}
+	clipFiles := make([]snapFile, 0, len(s.clipFiles))
+	for _, f := range s.clipFiles {
+		clipFiles = append(clipFiles, snapFile{Name: f.Name, Size: f.Size})
+	}
 	return snapshot{
 		Version:    s.version,
 		HistoryRev: s.historyRev,
@@ -598,6 +731,7 @@ func (s *State) snapshotLocked() snapshot {
 		Origin:     s.origin,
 		Image:      img,
 		Files:      files,
+		ClipFiles:  clipFiles,
 	}
 }
 
@@ -605,23 +739,36 @@ func (s *State) snapshotLocked() snapshot {
 
 func watchClipboard(b *Backend, st *State) {
 	for {
-		imgMime := ""
-		if b.supportsImages() {
-			for _, t := range b.targets() {
-				if isImageType(t) {
-					imgMime = t
-					break
-				}
+		imgMime, uriMime := "", ""
+		for _, t := range b.targets() {
+			if imgMime == "" && b.supportsImages() && isImageType(t) {
+				imgMime = t
+			}
+			if uriMime == "" && isURIType(t) {
+				uriMime = t
 			}
 		}
-		if imgMime != "" {
+		switch {
+		case imgMime != "":
 			data := b.readImage(imgMime)
 			if len(data) > 0 && st.setImage(data, imgMime, "linux") {
+				st.clearClipFiles()
 				st.history.addImage(data, imgMime)
 				fmt.Printf("[linux -> web] image %s, %d bytes\n", imgMime, len(data))
 			}
-		} else {
+		case uriMime != "":
+			// A file manager copied files: announce them instead of pasting the
+			// raw "file:///..." URI into the text box.
+			if st.setClipFiles(b.readURIs(uriMime)) {
+				names := st.clipFileNames()
+				if names == "" {
+					names = "—"
+				}
+				fmt.Printf("[linux -> web] files in clipboard: %s\n", names)
+			}
+		default:
 			text := b.readText()
+			st.clearClipFiles()
 			if st.setText(text, "linux") {
 				st.clearImage()
 				st.history.addText(text)
@@ -659,7 +806,7 @@ func watchShareDir(st *State) {
 	}
 }
 
-// safeTarget picks a non-clashing path inside directory for an uploaded file name.
+// safeTarget builds a path for an upload: "<name>_<YYYY-MM-DD_HH-MM-SS><ext>".
 func safeTarget(directory, filename string) string {
 	name := strings.TrimSpace(filepath.Base(strings.ReplaceAll(filename, "\x00", "")))
 	if name == "" || name == "." || name == string(filepath.Separator) {
@@ -667,12 +814,13 @@ func safeTarget(directory, filename string) string {
 	}
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	candidate := filepath.Join(directory, name)
+	stamped := base + "_" + time.Now().Format("2006-01-02_15-04-05")
+	candidate := filepath.Join(directory, stamped+ext)
 	for counter := 1; ; counter++ {
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
 			return candidate
 		}
-		candidate = filepath.Join(directory, fmt.Sprintf("%s (%d)%s", base, counter, ext))
+		candidate = filepath.Join(directory, fmt.Sprintf("%s (%d)%s", stamped, counter, ext))
 	}
 }
 
@@ -792,6 +940,7 @@ type postBody struct {
 	Text  string `json:"text"`
 	Token string `json:"token"`
 	ID    string `json:"id"`
+	Index int    `json:"index"`
 }
 
 func readJSON(r *http.Request) (*postBody, bool) {
@@ -828,6 +977,33 @@ func (s *server) handlePOST(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("[web -> linux] text: %s\n", collapse(body.Text, 60))
 		}
 		writeJSON(w, http.StatusOK, obj{"ok": true, "version": s.st.currentVersion()})
+
+	case "/grab":
+		body, ok := readJSON(r)
+		if !ok || !s.okToken(body.Token) {
+			writeJSON(w, http.StatusForbidden, obj{"error": "bad token"})
+			return
+		}
+		// Only files currently on the clipboard can be grabbed — the browser
+		// never gets to name a path of its own.
+		entry, found := s.st.clipFile(body.Index)
+		if !found {
+			writeJSON(w, http.StatusNotFound, obj{"error": "no file"})
+			return
+		}
+		// Grabbing the same file again just hands out the existing copy.
+		name := entry.Saved
+		if name == "" || !isRegularFile(filepath.Join(s.st.shareDir, name)) {
+			var err error
+			if name, err = copyIntoShare(entry, s.st.shareDir); err != nil {
+				fmt.Println("Failed to copy a clipboard file:", err)
+				writeJSON(w, http.StatusInternalServerError, obj{"error": "cannot copy file"})
+				return
+			}
+			s.st.markGrabbed(body.Index, entry.Path, name)
+			fmt.Printf("[linux -> web] grabbed %s as %s\n", entry.Path, name)
+		}
+		writeJSON(w, http.StatusOK, obj{"ok": true, "name": name})
 
 	case "/restore":
 		body, ok := readJSON(r)
@@ -870,6 +1046,36 @@ func (s *server) handlePOST(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusNotFound, obj{"error": "not found"})
 	}
+}
+
+func isRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// copyIntoShare copies a clipboard file into the shared folder and returns its new name.
+func copyIntoShare(entry clipFile, shareDir string) (string, error) {
+	src, err := os.Open(entry.Path)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	target := safeTarget(shareDir, entry.Name)
+	dst, err := os.Create(target)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(target)
+		return "", err
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(target)
+		return "", err
+	}
+	return filepath.Base(target), nil
 }
 
 func (s *server) handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -936,7 +1142,57 @@ func expandHome(p string) string {
 	return p
 }
 
+// localIPs returns the addresses a browser on the local network can reach us on.
 func localIPs() []string {
+	ips := privateIPv4s()
+	if len(ips) == 0 {
+		return routedIP()
+	}
+	// The address the default route would use is the most likely to work, so
+	// print it first — but only if it survived the filtering in privateIPv4s.
+	if primary := routedIP(); len(primary) == 1 {
+		if i := slices.Index(ips, primary[0]); i > 0 {
+			ips[0], ips[i] = ips[i], ips[0]
+		}
+	}
+	return ips
+}
+
+// privateIPv4s lists the private IPv4 addresses of the usable interfaces.
+// Interfaces that are down, loopback or point-to-point are skipped: the last
+// group is VPN tunnels, whose addresses mean nothing to a device on the LAN.
+func privateIPv4s() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	const unusable = net.FlagLoopback | net.FlagPointToPoint
+	var ips []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&unusable != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			net4, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if ip := net4.IP.To4(); ip != nil && ip.IsPrivate() {
+				ips = append(ips, ip.String())
+			}
+		}
+	}
+	return ips
+}
+
+// routedIP asks the routing table which address would be used to reach the
+// internet. With a full-tunnel VPN up that is the tunnel itself, which no other
+// device can connect to, so it is only a fallback and a hint about ordering.
+func routedIP() []string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return []string{"<laptop-ip>"}
@@ -1094,6 +1350,8 @@ const page = `<!doctype html>
   }
   .spacer { flex: 1; }
   #preview { display: none; }
+  #clipfiles { display: none; }
+  #clipfiles .name { flex: 1; overflow-wrap: anywhere; }
   #preview img {
     max-width: 100%; max-height: 40vh; border: 1px solid var(--line);
     border-radius: 6px; background: var(--panel); display: block;
@@ -1148,6 +1406,12 @@ const page = `<!doctype html>
     <p class="hint" data-i18n="previewHint">Правый клик по картинке &rarr; «Копировать изображение» — и она в буфере этого ПК.</p>
   </section>
 
+  <section id="clipfiles">
+    <h2 data-i18n="clipFilesTitle">Файлы в буфере линукса</h2>
+    <ul id="clipfilelist" class="files"></ul>
+    <p class="hint" data-i18n="clipFilesHint">«Скачать» сохраняет файл на этом устройстве и оставляет копию в общей папке.</p>
+  </section>
+
   <section>
     <div class="sec-head">
       <h2 data-i18n="historyTitle">История</h2>
@@ -1168,6 +1432,8 @@ const statusEl = document.getElementById('status');
 const preview = document.getElementById('preview');
 const img = document.getElementById('img');
 const filesEl = document.getElementById('files');
+const clipFilesBox = document.getElementById('clipfiles');
+const clipFilesEl = document.getElementById('clipfilelist');
 const historyEl = document.getElementById('history');
 const bar = document.getElementById('bar');
 const fileInput = document.getElementById('file');
@@ -1203,7 +1469,11 @@ const STR = {
     previewTitle: 'Картинка из буфера линукса',
     previewAlt: 'Изображение из буфера обмена линукса',
     previewHint: 'Правый клик по картинке → «Копировать изображение» — и она в буфере этого ПК.',
-    historyTitle: 'История', clear: 'Очистить', filesTitle: 'Общая папка'
+    historyTitle: 'История', clear: 'Очистить', filesTitle: 'Общая папка',
+    clipFilesTitle: 'Файлы в буфере линукса',
+    clipFilesHint: '«Скачать» сохраняет файл на этом устройстве и оставляет копию в общей папке.',
+    grab: 'Скачать', grabbing: 'забираю с линукса…',
+    grabbed: 'скачивается: ', grabFail: 'не удалось забрать файл'
   },
   en: {
     langBtn: 'language: en',
@@ -1231,7 +1501,11 @@ const STR = {
     previewTitle: 'Image from the linux clipboard',
     previewAlt: 'Image from the linux clipboard',
     previewHint: 'Right-click the image → "Copy image" — and it is in this PC\'s clipboard.',
-    historyTitle: 'History', clear: 'Clear', filesTitle: 'Shared folder'
+    historyTitle: 'History', clear: 'Clear', filesTitle: 'Shared folder',
+    clipFilesTitle: 'Files in the linux clipboard',
+    clipFilesHint: '"Download" saves the file on this device and keeps a copy in the shared folder.',
+    grab: 'Download', grabbing: 'fetching from linux…',
+    grabbed: 'downloading: ', grabFail: 'failed to grab the file'
   }
 };
 
@@ -1342,6 +1616,8 @@ function renderCurrent(data) {
     img.removeAttribute('src');
   }
 
+  renderClipFiles(data.clip_files || []);
+
   filesEl.innerHTML = '';
   if (!data.files.length) {
     filesEl.innerHTML = '<li class="empty">' + tr('empty') + '</li>';
@@ -1359,6 +1635,58 @@ function renderCurrent(data) {
       filesEl.appendChild(li);
     }
   }
+}
+
+// Files copied on linux: shown with a button, nothing is transferred until it is pressed.
+function renderClipFiles(items) {
+  clipFilesEl.innerHTML = '';
+  clipFilesBox.style.display = items.length ? 'block' : 'none';
+  items.forEach((f, i) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = f.name;
+    const size = document.createElement('span');
+    size.className = 'size';
+    size.textContent = humanSize(f.size);
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = tr('grab');
+    btn.addEventListener('click', () => grab(i, btn));
+    li.append(name, size, btn);
+    clipFilesEl.appendChild(li);
+  });
+}
+
+// Start a download of a file from the shared folder into this device's downloads.
+function downloadFile(name) {
+  const a = document.createElement('a');
+  a.href = '/file/' + q(name) + '?token=' + q(TOKEN);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// Grab = copy the file into the shared folder on linux, then pull it down here.
+// The server hands out the same copy if the file was already grabbed.
+async function grab(index, btn) {
+  btn.disabled = true;
+  setStatus('grabbing', true);
+  try {
+    const r = await fetch('/grab?token=' + q(TOKEN), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index, token: TOKEN })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'failed');
+    downloadFile(d.name);
+    setStatus('grabbed', true, d.name);
+  } catch (e) {
+    setStatus('grabFail', false);
+  }
+  btn.disabled = false;
 }
 
 async function loadHistory() {

@@ -8,7 +8,7 @@ A small HTTP server runs on the Linux machine. On any other device (Windows, Mac
 
 - **Text** — syncs both ways. Copy on Linux — it shows up in the browser; paste in the browser and hit "Send" (or Ctrl+Enter) — it lands in the Linux clipboard.
 - **Images** — an image copied on Linux is shown in the browser as a preview (right click → "Copy image"). An image pasted into the browser with Ctrl+V goes straight into the Linux system clipboard.
-- **Files** — a shared folder. Drag&drop into the browser window puts the file on the Linux side; everything in the folder is listed on the page and downloadable in one click.
+- **Files** — a shared folder. Drag&drop into the browser window puts the file on the Linux side; everything in the folder is listed on the page and downloadable in one click. The other way round: copy a file in a Linux file manager and the page shows it with a "Grab" button, which copies it into the shared folder to download.
 - **History** — everything copied (text and images) is written to disk and survives restarts. Any entry can be restored to the Linux clipboard or copied to the current device's clipboard.
 
 ## Installation
