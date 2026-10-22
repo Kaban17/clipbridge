@@ -1,10 +1,10 @@
 # clipbridge
 
-A shared clipboard (text + images + files + history) between a Linux machine and any device with a browser. A single Go file, standard library only — nothing to install on the second device.
+A shared clipboard (text + images + files + history) between a Linux (or macOS) machine and any device with a browser. A single self-contained Go binary, standard library only — nothing to install on the second device.
 
 ## How it works
 
-A small HTTP server runs on the Linux machine. On any other device (Windows, Mac, a phone — anything with a browser) you open a page, and then:
+A small HTTP server runs on the Linux machine (or a Mac — see below; "Linux" below means whichever machine runs the server). On any other device (Windows, Mac, a phone — anything with a browser) you open a page, and then:
 
 - **Text** — syncs both ways. Copy on Linux — it shows up in the browser; paste in the browser and hit "Send" (or Ctrl+Enter) — it lands in the Linux clipboard.
 - **Images** — an image copied on Linux is shown in the browser as a preview (right click → "Copy image"). An image pasted into the browser with Ctrl+V goes straight into the Linux system clipboard.
@@ -22,6 +22,8 @@ sudo apt install xsel           # X11, no image support
 ```
 
 That's it — no third-party dependencies.
+
+**macOS** works too, with nothing extra to install: the built-in `pbcopy`/`pbpaste` handle text, and `osascript` (JavaScript for Automation) handles images and files copied in Finder. Images copied as TIFF (most macOS apps) are served to the browser as PNG.
 
 ## Usage
 
@@ -54,11 +56,23 @@ This is a tool for a trusted local network. There is no HTTPS, and the token tra
 
 ## Under the hood
 
-A single file, `main.go`:
+A small Go program (`package main`, one binary):
 
-- a background goroutine polls the Linux clipboard every 0.5 s via `xclip`/`wl-paste`;
+```
+main.go                 flags, startup, shutdown
+internal/clipboard/     the system clipboard behind one interface:
+                        wl-clipboard / xclip / xsel on Linux, the pasteboard on macOS
+internal/state/         the current clipboard snapshot that browsers long-poll
+internal/history/       the persistent copy history
+internal/server/        HTTP API, clipboard and shared-folder pollers
+internal/netaddr/       which LAN addresses to print
+web/index.html          the web page, embedded into the binary with //go:embed
+```
+
+How it works:
+
+- a background goroutine polls the Linux clipboard every 0.5 s via `xclip`/`wl-paste`; on macOS a long-running `osascript` helper watches the pasteboard's change count, so an idle clipboard costs nothing;
 - the browser keeps a long-poll request to `/clip` and receives changes instantly;
 - echo loops are suppressed by comparing text and image SHA1 digests;
-- the web page (dark/light theme auto-following the system, Russian/English interface with a toggle in the header) is embedded in the binary as a string.
+- the web page (dark/light theme auto-following the system, Russian/English interface with a toggle in the header) is embedded in the binary.
 
-The original Python implementation with identical behavior is kept in `main.py` (`python3 main.py`, stdlib only).
