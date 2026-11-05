@@ -74,6 +74,11 @@ func (s *Server) syncClipboard() {
 		}
 	default:
 		text := s.clip.ReadText()
+		// Apps often clear the clipboard right before writing to it; that
+		// moment must not wipe the browser's text box.
+		if text == "" {
+			return
+		}
 		s.state.ClearClipFiles()
 		if s.state.SetText(text, state.OriginHost) {
 			s.state.ClearImage()

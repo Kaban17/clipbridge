@@ -155,12 +155,9 @@ func (s *State) SetFiles(files []FileInfo) {
 func (s *State) SetClipFiles(paths []string) bool {
 	entries := make([]ClipFile, 0, len(paths))
 	for _, path := range paths {
-		info, err := os.Stat(path)
-		// Directories cannot be sent as a single file, so skip them.
-		if err != nil || !info.Mode().IsRegular() {
-			continue
+		if info, ok := readableFile(path); ok {
+			entries = append(entries, ClipFile{Name: filepath.Base(path), Path: path, Size: info.Size()})
 		}
-		entries = append(entries, ClipFile{Name: filepath.Base(path), Path: path, Size: info.Size()})
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -265,6 +262,23 @@ func (s *State) snapshotLocked() Snapshot {
 		Files:      files,
 		ClipFiles:  clipFiles,
 	}
+}
+
+// readableFile reports whether path is a regular file we can open. Directories
+// cannot be sent as a single file; files in another app's sandbox (macOS
+// privacy protection) stat fine but cannot be opened, so Grab would fail.
+func readableFile(path string) (os.FileInfo, bool) {
+	info, err := os.Stat(path)
+	// Stat first: opening a FIFO would block.
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	f.Close()
+	return info, true
 }
 
 func digest16(data []byte) string {

@@ -123,6 +123,21 @@ func New(ctx context.Context) (Clipboard, error) {
 	return m, nil
 }
 
+// canOpen reports whether path is a regular file we are allowed to read.
+func canOpen(path string) bool {
+	info, err := os.Stat(path)
+	// Stat first: opening a FIFO would block.
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
 func osascript(timeout time.Duration, script string, args ...string) ([]byte, error) {
 	return cmdOutput(timeout, nil, append([]string{"osascript", "-l", "JavaScript", "-e", script}, args...)...)
 }
@@ -196,7 +211,9 @@ func (m *macClipboard) Formats() []string {
 	m.writing.Unlock()
 	_, types := m.state()
 	// Finder also puts the file icon on the pasteboard as an image: files win.
-	if slices.Contains(types, "public.file-url") {
+	// Unless we cannot open any of them: Telegram, for one, copies a photo as a
+	// file in its sandbox that macOS hides from other apps, plus the image itself.
+	if slices.Contains(types, "public.file-url") && slices.ContainsFunc(m.ReadFiles(""), canOpen) {
 		return []string{"text/uri-list"}
 	}
 	var res []string
