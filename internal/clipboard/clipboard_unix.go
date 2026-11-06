@@ -62,6 +62,9 @@ func New(context.Context) (Clipboard, error) {
 func (t *toolClipboard) Name() string         { return t.name }
 func (t *toolClipboard) SupportsImages() bool { return t.readAs != nil }
 
+// Seq is unknown: these tools have no cheap way to tell that the clipboard changed.
+func (t *toolClipboard) Seq() (int64, bool) { return 0, false }
+
 func (t *toolClipboard) Formats() []string {
 	if t.list == nil {
 		return []string{"text/plain"}

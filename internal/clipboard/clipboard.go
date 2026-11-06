@@ -22,6 +22,10 @@ type Clipboard interface {
 	Name() string
 	// SupportsImages reports whether images can be read and written at all.
 	SupportsImages() bool
+	// Seq returns a number that changes whenever the clipboard content does, so
+	// the poller can skip reading an unchanged clipboard. ok is false when the
+	// backend cannot tell, and then every poll reads everything.
+	Seq() (seq int64, ok bool)
 	// Formats lists what is currently on the clipboard, preferred first.
 	Formats() []string
 	ReadText() string

@@ -205,6 +205,14 @@ func (m *macClipboard) state() (int64, []string) {
 func (m *macClipboard) Name() string         { return "macOS pasteboard" }
 func (m *macClipboard) SupportsImages() bool { return true }
 
+// Seq is the pasteboard change count, unknown until the watcher first reports.
+func (m *macClipboard) Seq() (int64, bool) {
+	m.writing.Lock() // wait out a write in progress
+	m.writing.Unlock()
+	count, _ := m.state()
+	return count, count != 0
+}
+
 // Formats maps pasteboard UTIs to MIME types.
 func (m *macClipboard) Formats() []string {
 	m.writing.Lock() // wait out a write in progress

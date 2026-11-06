@@ -37,6 +37,8 @@ type Server struct {
 	history  *history.History
 	shareDir string
 	token    string
+
+	lastSeq int64 // clipboard Seq last read in full; only the poller touches it
 }
 
 // New returns a server for shareDir. An empty token disables auth.
@@ -117,10 +119,13 @@ func (s *Server) decodeRequest(w http.ResponseWriter, r *http.Request) (request,
 	return req, true
 }
 
+// writeBytes sends data uncached, unless the handler set Cache-Control itself.
 func writeBytes(w http.ResponseWriter, code int, data []byte, ctype string) {
 	h := w.Header()
 	h.Set("Content-Type", ctype)
-	h.Set("Cache-Control", "no-store")
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "no-store")
+	}
 	h.Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(code)
 	w.Write(data)
@@ -179,6 +184,7 @@ func (s *Server) handleHistoryImage(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
+	cacheForever(w)
 	writeBytes(w, http.StatusOK, data, mimeType)
 }
 
@@ -188,7 +194,15 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no image")
 		return
 	}
+	cacheForever(w)
 	writeBytes(w, http.StatusOK, img.Data, img.Mime)
+}
+
+// cacheForever marks a response that never changes for its URL: image IDs are
+// content digests or history entry IDs, both bound to fixed bytes. Otherwise
+// the page re-downloads every history thumbnail whenever the history changes.
+func cacheForever(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -247,6 +261,7 @@ func (s *Server) handleGrab(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.state.MarkGrabbed(req.Index, entry.Path, name)
+		s.rescanShareDir()
 		fmt.Printf("[linux -> web] grabbed %s as %s\n", entry.Path, name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
@@ -314,6 +329,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("[web -> linux] file: %s (%d bytes)\n", filepath.Base(target), length)
+	s.rescanShareDir()
 
 	if toClipboard {
 		data := buf.Bytes()

@@ -346,7 +346,9 @@ function ago(ts) {
 function renderCurrent(data) {
   if (data.origin === 'linux' && !dirty) box.value = data.text;
   if (data.image) {
-    img.src = '/image/' + data.image.id + '?token=' + q(TOKEN);
+    // Setting the same src again would refetch it on every version bump.
+    const src = '/image/' + data.image.id + '?token=' + q(TOKEN);
+    if (img.getAttribute('src') !== src) img.src = src;
     preview.style.display = 'block';
   } else {
     preview.style.display = 'none';
@@ -440,6 +442,8 @@ async function loadHistory() {
     if (it.kind === 'image') {
       const t = document.createElement('img');
       t.className = 'thumb';
+      t.loading = 'lazy';
+      t.decoding = 'async';
       t.src = '/history/image/' + it.id + '?token=' + q(TOKEN);
       t.alt = tr('histImgAlt');
       li.appendChild(t);
